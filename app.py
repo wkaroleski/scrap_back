@@ -53,16 +53,16 @@ def scrape_pokemon(canal, usuario):
     """
     url = f"https://grynsoft.com/spos-app/?c={canal}&u={usuario}"
     
-    # Configuração do Proxy
-    proxies = {
-        "http": "http://63.143.57.117:80",  # Proxy HTTP
-        "http": "https://52.26.114.229:1080",  # Proxy HTTPS
-    }
+    # # Configuração do Proxy
+    # proxies = {
+    #     "http": "http://63.143.57.117:80",  # Proxy HTTP
+    #     "http": "https://52.26.114.229:1080",  # Proxy HTTPS
+    # }
 
-    # Headers para simular um navegador real
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+    # # Headers para simular um navegador real
+    # headers = {
+    #     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    # }
 
     try:
         print(f"Scraping URL: {url}")
