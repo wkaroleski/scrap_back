@@ -127,7 +127,15 @@ def fetch_pokemon_details(pokemon_id):
         types = [t["pokemon_v2_type"]["name"] for t in data["pokemon_v2_pokemontypes"]]
 
         # Extrai as imagens
-        sprites = json.loads(data["pokemon_v2_pokemonsprites"][0]["sprites"])
+        sprites_data = data["pokemon_v2_pokemonsprites"][0]["sprites"]
+        if isinstance(sprites_data, str):
+            sprites = json.loads(sprites_data)
+        elif isinstance(sprites_data, dict):
+            sprites = sprites_data
+        else:
+            print(f"Tipo inesperado para sprites: {type(sprites_data)}")
+            sprites = {}  # Ou outra forma de lidar com o tipo inesperado
+
         image = sprites.get("front_default")
         shiny_image = sprites.get("front_shiny")
 
@@ -186,7 +194,7 @@ def scrape_pokemon(canal, usuario):
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        pokemons = []
+        pokemons =
         seen_ids = set()  # Armazena os IDs dos Pokémon já processados
 
         pokemon_elements = soup.select('.Pokemon:not(#unobtained)')
