@@ -3,74 +3,120 @@ from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import time
-import certifi
+import psycopg2
+from psycopg2 import sql
 import os
 
 app = Flask(__name__)
 CORS(app)
 
-# Configura o certificado SSL
-os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+# Configurações do banco de dados (usando variáveis de ambiente)
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST"),
+    "port": os.getenv("DB_PORT"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME")
+}
 
-# Cache para armazenar os detalhes dos Pokémon
-pokemon_cache = {}
+def get_db_connection():
+    """Retorna uma conexão com o banco de dados."""
+    return psycopg2.connect(**DB_CONFIG)
 
-def fetch_pokemon_details(pokemon_id, max_retries=3, delay=5):
+def init_db():
+    """Cria a tabela 'pokemon' se ela não existir."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pokemon (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            stats TEXT,
+            total_base_stats INTEGER,
+            types TEXT,
+            image TEXT,
+            shiny_image TEXT
+        )
+    ''')
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+# Inicializa o banco de dados
+init_db()
+
+def fetch_pokemon_details(pokemon_id):
     """
     Busca detalhes do Pokémon na API usando o ID.
-    Retorna None se o Pokémon não for encontrado após várias tentativas.
+    Retorna None se o Pokémon não for encontrado.
     """
-    if pokemon_id in pokemon_cache:
-        print(f"Retornando dados do Pokémon ID {pokemon_id} do cache.")
-        return pokemon_cache[pokemon_id]
+    # Verifica se os dados já estão no banco de dados
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT * FROM pokemon WHERE id = %s', (pokemon_id,))
+    row = cursor.fetchone()
+
+    if row:
+        print(f"Retornando dados do Pokémon ID {pokemon_id} do banco de dados.")
+        return {
+            'id': row[0],
+            'name': row[1],
+            'stats': eval(row[2]),  # Converte a string JSON de volta para um dicionário
+            'total_base_stats': row[3],
+            'types': eval(row[4]),  # Converte a string JSON de volta para uma lista
+            'image': row[5],
+            'shiny_image': row[6]
+        }
 
     url = f"https://pokeapi.co/api/v2/pokemon/{pokemon_id}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
 
-    # Configuração dos proxies
-    proxies = {
-        "http": "http://63.143.57.117:80",  # Proxy HTTP
-        "https": "http://52.26.114.229:1080",  # Proxy HTTPS
-    }
+    try:
+        print(f"Buscando detalhes do Pokémon ID {pokemon_id} na API...")
+        response = requests.get(url, headers=headers, verify=False)
+        response.raise_for_status()
+        data = response.json()
 
-    for attempt in range(max_retries):
-        try:
-            print(f"Tentativa {attempt + 1} de buscar detalhes do Pokémon ID {pokemon_id}...")
-            response = requests.get(url, headers=headers, proxies=proxies)
-            response.raise_for_status()
-            data = response.json()
+        # Extrai os stats
+        stats = {stat['stat']['name']: stat['base_stat'] for stat in data['stats']}
+        total_base_stats = sum(stat['base_stat'] for stat in data['stats'])
 
-            stats = {}
-            total_base_stats = 0
-            for stat_entry in data['stats']:
-                stat_name = stat_entry['stat']['name']
-                base_stat = stat_entry['base_stat']
-                stats[stat_name] = base_stat
-                total_base_stats += base_stat
+        pokemon_data = {
+            'id': pokemon_id,
+            'name': data['name'],
+            'stats': stats,
+            'total_base_stats': total_base_stats,
+            'types': [t['type']['name'] for t in data.get('types', [])],
+            'image': data['sprites']['front_default'],
+            'shiny_image': data['sprites']['front_shiny']
+        }
 
-            pokemon_data = {
-                'id': pokemon_id,
-                'name': data['name'],
-                'stats': stats,
-                'total_base_stats': total_base_stats,
-                'types': [t['type']['name'] for t in data.get('types', [])],
-                'image': data['sprites']['front_default'],
-                'shiny_image': data['sprites']['front_shiny']
-            }
+        # Armazena os dados no banco de dados
+        cursor.execute('''
+        INSERT INTO pokemon (id, name, stats, total_base_stats, types, image, shiny_image)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ''', (
+            pokemon_id,
+            pokemon_data['name'],
+            str(pokemon_data['stats']),  # Converte o dicionário para uma string JSON
+            pokemon_data['total_base_stats'],
+            str(pokemon_data['types']),  # Converte a lista para uma string JSON
+            pokemon_data['image'],
+            pokemon_data['shiny_image']
+        ))
+        conn.commit()
 
-            pokemon_cache[pokemon_id] = pokemon_data
-            print(f"Dados do Pokémon ID {pokemon_id} armazenados no cache.")
-            return pokemon_data
-        except requests.exceptions.RequestException as e:
-            print(f"Erro ao buscar detalhes do Pokémon ID {pokemon_id}: {e}")
-            if attempt < max_retries - 1:
-                print(f"Tentando novamente em {delay} segundos...")
-                time.sleep(delay)
-            else:
-                print(f"Falha ao buscar detalhes do Pokémon ID {pokemon_id} após {max_retries} tentativas.")
-                return None
+        print(f"Dados do Pokémon ID {pokemon_id} armazenados no banco de dados.")
+        return pokemon_data
+    except requests.exceptions.RequestException as e:
+        print(f"Erro ao buscar detalhes do Pokémon ID {pokemon_id}: {e}")
+        return None
+    finally:
+        cursor.close()
+        conn.close()
 
 def scrape_pokemon(canal, usuario):
     """
@@ -84,15 +130,11 @@ def scrape_pokemon(canal, usuario):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
 
-    # Configuração dos proxies
-    proxies = {
-        "http": "http://63.143.57.117:80",  # Proxy HTTP
-        "https": "http://52.26.114.229:1080",  # Proxy HTTPS
-    }
-
     try:
         print(f"Scraping URL: {url}")
-        response = requests.get(url, headers=headers, proxies=proxies)
+        response = requests.get(url, headers=headers, verify=False)  # Ignora SSL
+        print(f"Status Code: {response.status_code}")
+        print(f"Response Content: {response.text}")  # Verifica o conteúdo da resposta
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
