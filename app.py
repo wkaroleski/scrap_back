@@ -3,9 +3,14 @@ from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import time
+import certifi
+import os
 
 app = Flask(__name__)
 CORS(app)
+
+# Configura o certificado SSL
+os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 
 # Cache para armazenar os detalhes dos Pokémon
 pokemon_cache = {}
@@ -87,7 +92,7 @@ def scrape_pokemon(canal, usuario):
 
     try:
         print(f"Scraping URL: {url}")
-        response = requests.get(url, headers=headers, proxies=proxies, verify=False)
+        response = requests.get(url, headers=headers, proxies=proxies)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
