@@ -7,6 +7,8 @@ import psycopg2
 from psycopg2 import sql
 import os
 import json
+from gql import gql, Client
+from gql.transport.aiohttp import AIOHTTPTransport
 
 app = Flask(__name__)
 CORS(app)
@@ -19,6 +21,13 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME")
 }
+
+# Configuração da PokéAPI GraphQL
+POKEAPI_GRAPHQL_URL = "https://beta.pokeapi.co/graphql/v1beta"
+
+# Cria um cliente GraphQL
+transport = AIOHTTPTransport(url=POKEAPI_GRAPHQL_URL)
+client = Client(transport=transport, fetch_schema_from_transport=True)
 
 def get_db_connection():
     """Retorna uma conexão com o banco de dados."""
@@ -48,7 +57,7 @@ init_db()
 
 def fetch_pokemon_details(pokemon_id):
     """
-    Busca detalhes do Pokémon na API usando o ID.
+    Busca detalhes do Pokémon na PokéAPI GraphQL usando o ID.
     Retorna None se o Pokémon não for encontrado.
     """
     # Verifica se os dados já estão no banco de dados
@@ -70,29 +79,60 @@ def fetch_pokemon_details(pokemon_id):
             'shiny_image': row[6]
         }
 
-    url = f"https://pokeapi.co/api/v2/pokemon/{pokemon_id}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+    # Query GraphQL para buscar os detalhes do Pokémon
+    query = gql('''
+        query GetPokemonDetails($id: Int!) {
+            pokemon_v2_pokemon(where: {id: {_eq: $id}}) {
+                id
+                name
+                pokemon_v2_pokemonstats {
+                    base_stat
+                    pokemon_v2_stat {
+                        name
+                    }
+                }
+                pokemon_v2_pokemontypes {
+                    pokemon_v2_type {
+                        name
+                    }
+                }
+                pokemon_v2_pokemonsprites {
+                    sprites
+                }
+            }
+        }
+    ''')
 
     try:
-        print(f"Buscando detalhes do Pokémon ID {pokemon_id} na API...")
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
+        print(f"Buscando detalhes do Pokémon ID {pokemon_id} na PokéAPI GraphQL...")
+        result = client.execute(query, variable_values={"id": pokemon_id})
+
+        if not result["pokemon_v2_pokemon"]:
+            print(f"Pokémon ID {pokemon_id} não encontrado.")
+            return None
+
+        data = result["pokemon_v2_pokemon"][0]
 
         # Extrai os stats
-        stats = {stat['stat']['name']: stat['base_stat'] for stat in data['stats']}
-        total_base_stats = sum(stat['base_stat'] for stat in data['stats'])
+        stats = {stat["pokemon_v2_stat"]["name"]: stat["base_stat"] for stat in data["pokemon_v2_pokemonstats"]}
+        total_base_stats = sum(stat["base_stat"] for stat in data["pokemon_v2_pokemonstats"])
+
+        # Extrai os tipos
+        types = [t["pokemon_v2_type"]["name"] for t in data["pokemon_v2_pokemontypes"]]
+
+        # Extrai as imagens
+        sprites = json.loads(data["pokemon_v2_pokemonsprites"][0]["sprites"])
+        image = sprites.get("front_default")
+        shiny_image = sprites.get("front_shiny")
 
         pokemon_data = {
             'id': data['id'],
             'name': data['name'],
             'stats': json.dumps(stats),  # Converte o dicionário para JSON
             'total_base_stats': total_base_stats,
-            'types': json.dumps([t['type']['name'] for t in data.get('types', [])]),  # Converte a lista para JSON
-            'image': data['sprites']['front_default'],
-            'shiny_image': data['sprites']['front_shiny']
+            'types': json.dumps(types),  # Converte a lista para JSON
+            'image': image,
+            'shiny_image': shiny_image
         }
 
         # Armazena os dados no banco de dados
@@ -113,7 +153,7 @@ def fetch_pokemon_details(pokemon_id):
 
         print(f"Dados do Pokémon ID {pokemon_data['id']} armazenados no banco de dados.")
         return pokemon_data
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"Erro ao buscar detalhes do Pokémon ID {pokemon_id}: {e}")
         return None
     finally:
@@ -123,7 +163,7 @@ def fetch_pokemon_details(pokemon_id):
 def scrape_pokemon(canal, usuario):
     """
     Faz o scraping da página e coleta os Pokémon.
-    Usa o ID para buscar os dados na API.
+    Usa o ID para buscar os dados na PokéAPI GraphQL.
     """
     url = f"https://grynsoft.com/spos-app/?c={canal}&u={usuario}"
 
@@ -167,8 +207,8 @@ def scrape_pokemon(canal, usuario):
             # Verifica se o Pokémon é shiny
             shiny = element.get('id') == 'shiny'
 
-            # Busca detalhes na API usando o ID
-            api_data = fetch_pokemon_details(pokemon_id)
+            # Busca detalhes na PokéAPI GraphQL usando o ID
+            api_data = fetch_pokemon_details(int(pokemon_id))
             if api_data:
                 pokemons.append({
                     'id': pokemon_id,
