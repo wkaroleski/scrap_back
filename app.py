@@ -1,28 +1,20 @@
 from flask import Flask, jsonify, request
-from flask_cors import CORS  # Importe o CORS
+from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import time
 
 app = Flask(__name__)
-CORS(app)  # Habilite o CORS para todas as rotas
+CORS(app)
 
 # Cache para armazenar os detalhes dos Pokémon
 pokemon_cache = {}
 
-def normalize_pokemon_name(name):
-    """
-    Normaliza o nome do Pokémon para ser compatível com a API.
-    Exemplo: "Farfetch'd" -> "farfetchd"
-    """
-    return name.lower().replace("'", "").replace(" ", "-")
-
-def fetch_pokemon_details(pokemon_id):
+def fetch_pokemon_details(pokemon_id, max_retries=3, delay=5):
     """
     Busca detalhes do Pokémon na API usando o ID.
-    Retorna None se o Pokémon não for encontrado.
+    Retorna None se o Pokémon não for encontrado após várias tentativas.
     """
-    # Verifica se os detalhes do Pokémon já estão no cache
     if pokemon_id in pokemon_cache:
         print(f"Retornando dados do Pokémon ID {pokemon_id} do cache.")
         return pokemon_cache[pokemon_id]
@@ -31,41 +23,49 @@ def fetch_pokemon_details(pokemon_id):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-    try:
-        print(f"Buscando detalhes do Pokémon ID {pokemon_id} na API...")
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()  # Lança um erro se a requisição falhar
-        data = response.json()
 
-        # Extrai os stats
-        stats = {}
-        total_base_stats = 0  # Variável para armazenar o total dos stats base
-        for stat_entry in data['stats']:
-            stat_name = stat_entry['stat']['name']
-            base_stat = stat_entry['base_stat']
-            stats[stat_name] = base_stat
-            total_base_stats += base_stat  # Soma o valor do stat ao total
+    # Configuração dos proxies
+    proxies = {
+        "http": "http://63.143.57.117:80",  # Proxy HTTP
+        "https": "http://52.26.114.229:1080",  # Proxy HTTPS
+    }
 
-        pokemon_data = {
-            'id': pokemon_id,
-            'name': data['name'],
-            'stats': stats,
-            'total_base_stats': total_base_stats,  # Adiciona o total dos stats base
-            'types': [t['type']['name'] for t in data.get('types', [])],
-            'image': data['sprites']['front_default'],
-            'shiny_image': data['sprites']['front_shiny']
-        }
+    for attempt in range(max_retries):
+        try:
+            print(f"Tentativa {attempt + 1} de buscar detalhes do Pokémon ID {pokemon_id}...")
+            response = requests.get(url, headers=headers, proxies=proxies)
+            response.raise_for_status()
+            data = response.json()
 
-        # Armazena os dados no cache
-        pokemon_cache[pokemon_id] = pokemon_data
-        print(f"Dados do Pokémon ID {pokemon_id} armazenados no cache.")
+            stats = {}
+            total_base_stats = 0
+            for stat_entry in data['stats']:
+                stat_name = stat_entry['stat']['name']
+                base_stat = stat_entry['base_stat']
+                stats[stat_name] = base_stat
+                total_base_stats += base_stat
 
-        return pokemon_data
-    except requests.exceptions.RequestException as e:
-        print(f"Erro ao buscar detalhes do Pokémon ID {pokemon_id}: {e}")
-        return None
-    finally:
-        time.sleep(1)  # Adiciona um delay de 1 segundo entre as requisições
+            pokemon_data = {
+                'id': pokemon_id,
+                'name': data['name'],
+                'stats': stats,
+                'total_base_stats': total_base_stats,
+                'types': [t['type']['name'] for t in data.get('types', [])],
+                'image': data['sprites']['front_default'],
+                'shiny_image': data['sprites']['front_shiny']
+            }
+
+            pokemon_cache[pokemon_id] = pokemon_data
+            print(f"Dados do Pokémon ID {pokemon_id} armazenados no cache.")
+            return pokemon_data
+        except requests.exceptions.RequestException as e:
+            print(f"Erro ao buscar detalhes do Pokémon ID {pokemon_id}: {e}")
+            if attempt < max_retries - 1:
+                print(f"Tentando novamente em {delay} segundos...")
+                time.sleep(delay)
+            else:
+                print(f"Falha ao buscar detalhes do Pokémon ID {pokemon_id} após {max_retries} tentativas.")
+                return None
 
 def scrape_pokemon(canal, usuario):
     """
@@ -79,9 +79,15 @@ def scrape_pokemon(canal, usuario):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
 
+    # Configuração dos proxies
+    proxies = {
+        "http": "http://63.143.57.117:80",  # Proxy HTTP
+        "https": "http://52.26.114.229:1080",  # Proxy HTTPS
+    }
+
     try:
         print(f"Scraping URL: {url}")
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, proxies=proxies)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
