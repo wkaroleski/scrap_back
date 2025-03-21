@@ -59,17 +59,17 @@ def scrape_pokemon(canal, usuario):
     #     "http": "https://52.26.114.229:1080",  # Proxy HTTPS
     # }
 
-    # # Headers para simular um navegador real
-    # headers = {
-    #     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    # }
+    # Headers para simular um navegador real
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
 
     try:
         print(f"Scraping URL: {url}")
         print(f"Usando Proxy: {proxies}")  # Imprime o proxy sendo usado
 
         # Faz a requisição com o proxy e headers
-        response = requests.get(url, proxies=proxies, headers=headers)
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
