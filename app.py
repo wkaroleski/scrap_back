@@ -2,9 +2,13 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS  # Importe o CORS
 import requests
 from bs4 import BeautifulSoup
+import time
 
 app = Flask(__name__)
 CORS(app)  # Habilite o CORS para todas as rotas
+
+# Cache para armazenar os detalhes dos Pokémon
+pokemon_cache = {}
 
 def normalize_pokemon_name(name):
     """
@@ -18,9 +22,18 @@ def fetch_pokemon_details(pokemon_id):
     Busca detalhes do Pokémon na API usando o ID.
     Retorna None se o Pokémon não for encontrado.
     """
+    # Verifica se os detalhes do Pokémon já estão no cache
+    if pokemon_id in pokemon_cache:
+        print(f"Retornando dados do Pokémon ID {pokemon_id} do cache.")
+        return pokemon_cache[pokemon_id]
+
     url = f"https://pokeapi.co/api/v2/pokemon/{pokemon_id}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     try:
-        response = requests.get(url)
+        print(f"Buscando detalhes do Pokémon ID {pokemon_id} na API...")
+        response = requests.get(url, headers=headers)
         response.raise_for_status()  # Lança um erro se a requisição falhar
         data = response.json()
 
@@ -33,7 +46,7 @@ def fetch_pokemon_details(pokemon_id):
             stats[stat_name] = base_stat
             total_base_stats += base_stat  # Soma o valor do stat ao total
 
-        return {
+        pokemon_data = {
             'id': pokemon_id,
             'name': data['name'],
             'stats': stats,
@@ -42,9 +55,17 @@ def fetch_pokemon_details(pokemon_id):
             'image': data['sprites']['front_default'],
             'shiny_image': data['sprites']['front_shiny']
         }
+
+        # Armazena os dados no cache
+        pokemon_cache[pokemon_id] = pokemon_data
+        print(f"Dados do Pokémon ID {pokemon_id} armazenados no cache.")
+
+        return pokemon_data
     except requests.exceptions.RequestException as e:
         print(f"Erro ao buscar detalhes do Pokémon ID {pokemon_id}: {e}")
         return None
+    finally:
+        time.sleep(1)  # Adiciona um delay de 1 segundo entre as requisições
 
 def scrape_pokemon(canal, usuario):
     """
@@ -52,12 +73,6 @@ def scrape_pokemon(canal, usuario):
     Usa o ID para buscar os dados na API.
     """
     url = f"https://grynsoft.com/spos-app/?c={canal}&u={usuario}"
-    
-    # # Configuração do Proxy
-    # proxies = {
-    #     "http": "http://63.143.57.117:80",  # Proxy HTTP
-    #     "http": "https://52.26.114.229:1080",  # Proxy HTTPS
-    # }
 
     # Headers para simular um navegador real
     headers = {
@@ -66,9 +81,6 @@ def scrape_pokemon(canal, usuario):
 
     try:
         print(f"Scraping URL: {url}")
-        # print(f"Usando Proxy: {proxies}")  # Imprime o proxy sendo usado
-
-        # Faz a requisição com o proxy e headers
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -137,6 +149,7 @@ def get_pokemons():
     canal = request.args.get('canal')
     usuario = request.args.get('usuario')
     if canal and usuario:
+        print(f"Recebida requisição para canal={canal}, usuario={usuario}")
         pokemons = scrape_pokemon(canal, usuario)
         return jsonify(pokemons)  # Retorna os dados em JSON
     else:
