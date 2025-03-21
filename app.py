@@ -87,7 +87,7 @@ def scrape_pokemon(canal, usuario):
 
     try:
         print(f"Scraping URL: {url}")
-        response = requests.get(url, headers=headers, proxies=proxies)
+        response = requests.get(url, headers=headers, proxies=proxies, verify=False)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
