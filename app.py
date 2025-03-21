@@ -25,8 +25,14 @@ DB_CONFIG = {
 # Configuração da PokéAPI GraphQL
 POKEAPI_GRAPHQL_URL = "https://beta.pokeapi.co/graphql/v1beta"
 
-# Cria um cliente GraphQL
-transport = AIOHTTPTransport(url=POKEAPI_GRAPHQL_URL)
+# Adiciona headers personalizados
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Content-Type": "application/json",
+}
+
+# Cria um cliente GraphQL com headers e SSL habilitado
+transport = AIOHTTPTransport(url=POKEAPI_GRAPHQL_URL, headers=headers, ssl=True)
 client = Client(transport=transport, fetch_schema_from_transport=True)
 
 def get_db_connection():
