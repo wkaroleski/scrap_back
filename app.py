@@ -66,7 +66,7 @@ def scrape_pokemon(canal, usuario):
 
     try:
         print(f"Scraping URL: {url}")
-        print(f"Usando Proxy: {proxies}")  # Imprime o proxy sendo usado
+        # print(f"Usando Proxy: {proxies}")  # Imprime o proxy sendo usado
 
         # Faz a requisição com o proxy e headers
         response = requests.get(url, headers=headers)
