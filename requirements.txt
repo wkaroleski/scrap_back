@@ -5,3 +5,4 @@ beautifulsoup4==4.12.2
 psycopg2==2.9.6
 gql==3.4.1
 aiohttp==3.8.5
+gunicorn==21.2.0
