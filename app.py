@@ -194,7 +194,7 @@ def scrape_pokemon(canal, usuario):
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        pokemons =
+        pokemons = scrape_pokemon(canal, usuario)
         seen_ids = set()  # Armazena os IDs dos Pokémon já processados
 
         pokemon_elements = soup.select('.Pokemon:not(#unobtained)')
