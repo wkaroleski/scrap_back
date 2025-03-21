@@ -6,6 +6,7 @@ import time
 import psycopg2
 from psycopg2 import sql
 import os
+import json
 
 app = Flask(__name__)
 CORS(app)
@@ -31,9 +32,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS pokemon (
             id INTEGER PRIMARY KEY,
             name TEXT,
-            stats TEXT,
+            stats JSONB,  -- Armazena os stats como JSON
             total_base_stats INTEGER,
-            types TEXT,
+            types JSONB,  -- Armazena os tipos como JSON
             image TEXT,
             shiny_image TEXT
         )
@@ -62,9 +63,9 @@ def fetch_pokemon_details(pokemon_id):
         return {
             'id': row[0],
             'name': row[1],
-            'stats': eval(row[2]),  # Converte a string JSON de volta para um dicionário
+            'stats': json.loads(row[2]),  # Converte o JSON de volta para um dicionário
             'total_base_stats': row[3],
-            'types': eval(row[4]),  # Converte a string JSON de volta para uma lista
+            'types': json.loads(row[4]),  # Converte o JSON de volta para uma lista
             'image': row[5],
             'shiny_image': row[6]
         }
@@ -76,7 +77,7 @@ def fetch_pokemon_details(pokemon_id):
 
     try:
         print(f"Buscando detalhes do Pokémon ID {pokemon_id} na API...")
-        response = requests.get(url, headers=headers, verify=False)
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
         data = response.json()
 
@@ -85,11 +86,11 @@ def fetch_pokemon_details(pokemon_id):
         total_base_stats = sum(stat['base_stat'] for stat in data['stats'])
 
         pokemon_data = {
-            'id': pokemon_id,
+            'id': data['id'],
             'name': data['name'],
-            'stats': stats,
+            'stats': json.dumps(stats),  # Converte o dicionário para JSON
             'total_base_stats': total_base_stats,
-            'types': [t['type']['name'] for t in data.get('types', [])],
+            'types': json.dumps([t['type']['name'] for t in data.get('types', [])]),  # Converte a lista para JSON
             'image': data['sprites']['front_default'],
             'shiny_image': data['sprites']['front_shiny']
         }
@@ -98,18 +99,19 @@ def fetch_pokemon_details(pokemon_id):
         cursor.execute('''
         INSERT INTO pokemon (id, name, stats, total_base_stats, types, image, shiny_image)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO NOTHING;  -- Evita duplicatas
         ''', (
-            pokemon_id,
+            pokemon_data['id'],
             pokemon_data['name'],
-            str(pokemon_data['stats']),  # Converte o dicionário para uma string JSON
+            pokemon_data['stats'],
             pokemon_data['total_base_stats'],
-            str(pokemon_data['types']),  # Converte a lista para uma string JSON
+            pokemon_data['types'],
             pokemon_data['image'],
             pokemon_data['shiny_image']
         ))
         conn.commit()
 
-        print(f"Dados do Pokémon ID {pokemon_id} armazenados no banco de dados.")
+        print(f"Dados do Pokémon ID {pokemon_data['id']} armazenados no banco de dados.")
         return pokemon_data
     except requests.exceptions.RequestException as e:
         print(f"Erro ao buscar detalhes do Pokémon ID {pokemon_id}: {e}")
@@ -132,7 +134,7 @@ def scrape_pokemon(canal, usuario):
 
     try:
         print(f"Scraping URL: {url}")
-        response = requests.get(url, headers=headers, verify=False)  # Ignora SSL
+        response = requests.get(url, headers=headers)
         print(f"Status Code: {response.status_code}")
         print(f"Response Content: {response.text}")  # Verifica o conteúdo da resposta
         response.raise_for_status()
