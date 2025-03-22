@@ -180,7 +180,14 @@ def scrape_pokemon(canal, usuario):
 
             shiny = element.get('id') == 'shiny'
 
-            api_data = fetch_pokemon_details(int(pokemon_id))
+            # Verifica se pokemon_id é um número válido
+            try:
+                pokemon_id = int(pokemon_id)
+            except ValueError:
+                print(f"ID inválido: {pokemon_id}")
+                continue  # Ignora IDs inválidos
+
+            api_data = fetch_pokemon_details(pokemon_id)
             if api_data:
                 pokemons.append({
                     'id': pokemon_id,
