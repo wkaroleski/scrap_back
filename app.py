@@ -116,15 +116,17 @@ def fetch_pokemon_details(pokemon_id: int):
                     # psycopg2 já decodifica JSONB para dict/list
                     stats_data = row[2] if row[2] is not None else {}
                     types_data = row[4] if row[4] is not None else []
+                    # --- INÍCIO DA CORREÇÃO NO CACHE HIT ---
                     return {
                         'id': row[0],
                         'name': row[1],
-                        'stats': stats_data,
+                        'stats': stats_data,         # <-- CORRIGIDO: Retorna o dict/list diretamente
                         'total_base_stats': row[3],
-                        'types': types_data,
+                        'types': types_data,         # <-- CORRIGIDO: Retorna o dict/list diretamente
                         'image': row[5],
                         'shiny_image': row[6]
                     }
+                    # --- FIM DA CORREÇÃO NO CACHE HIT ---
 
                 # 2. Se não achou no DB, busca na API
                 query = gql('''
@@ -159,14 +161,14 @@ def fetch_pokemon_details(pokemon_id: int):
                     try:
                         if isinstance(sprite_json_or_dict, str): sprites = json.loads(sprite_json_or_dict)
                         elif isinstance(sprite_json_or_dict, dict): sprites = sprite_json_or_dict
-                    except json.JSONDecodeError: pass # Ignore sprite decoding errors silently
+                    except json.JSONDecodeError: pass
 
                 image = sprites.get("front_default")
                 shiny_image = sprites.get("front_shiny")
 
                 # 3. Insere os dados buscados da API no cache 'pokemon'
-                stats_json = json.dumps(stats)
-                types_json = json.dumps(types)
+                stats_json = json.dumps(stats) # Converte para JSON SÓ para inserir
+                types_json = json.dumps(types) # Converte para JSON SÓ para inserir
                 try:
                     cursor.execute('''
                         INSERT INTO pokemon (id, name, stats, total_base_stats, types, image, shiny_image)
@@ -175,12 +177,12 @@ def fetch_pokemon_details(pokemon_id: int):
                     ''', (data['id'], data['name'], stats_json, total_base_stats, types_json, image, shiny_image))
                 except psycopg2.Error as insert_err:
                      print(f"DB_ERROR: Falha ao inserir detalhes do ID {pokemon_id} no cache 'pokemon': {insert_err}")
-                     # Continua mesmo se falhar em salvar no cache de detalhes
 
-                # 4. Retorna os dados processados da API
+                # 4. Retorna os dados processados da API (OBJETOS PYTHON)
+                # (Esta parte já estava correta no código que você enviou antes)
                 return {
-                    'id': data['id'], 'name': data['name'], 'stats': stats,
-                    'total_base_stats': total_base_stats, 'types': types,
+                    'id': data['id'], 'name': data['name'], 'stats': stats, # Retorna dict
+                    'total_base_stats': total_base_stats, 'types': types, # Retorna list
                     'image': image, 'shiny_image': shiny_image
                 }
     except psycopg2.Error as db_err:
@@ -349,9 +351,9 @@ def get_pokemons():
             if details:
                 pokemons_result.append({
                     'id': details['id'], 'name': details['name'],
-                    'shiny': shiny_status, 'stats': details['stats'],
+                    'shiny': shiny_status, 'stats': details['stats'], # details['stats'] já é dict
                     'total_base_stats': details['total_base_stats'],
-                    'types': details['types'],
+                    'types': details['types'], # details['types'] já é list
                     'image': details['shiny_image'] if shiny_status else details['image']
                 })
             else:
