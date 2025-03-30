@@ -21,10 +21,7 @@ app = Flask(__name__)
 CORS(app)
 
 # --- Configurações ---
-# Tempo de vida do cache da lista de dex do usuário (em segundos)
-USER_DEX_CACHE_TTL_SECONDS = 15 * 60 # 15 minutos
-
-# Configurações do banco de dados (lidas das variáveis de ambiente)
+USER_DEX_CACHE_TTL_SECONDS = 24 * 60 * 60 #24 horas
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": os.getenv("DB_PORT"),
@@ -33,12 +30,12 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME")
 }
 
-# Valida se as variáveis de ambiente do DB estão configuradas
+# Validação das Variáveis de Ambiente
 for key, value in DB_CONFIG.items():
     if value is None:
-        raise ValueError(f"Variável de ambiente {key} não configurada. Verifique seu arquivo .env ou as variáveis de ambiente.")
+        raise ValueError(f"Variável de ambiente {key} não configurada.")
 
-# Configuração da PokéAPI GraphQL
+# Configuração PokéAPI GraphQL
 POKEAPI_GRAPHQL_URL = "https://beta.pokeapi.co/graphql/v1beta"
 headers = {
     "User-Agent": "Mozilla/5.0",
@@ -47,7 +44,7 @@ headers = {
 try:
     transport = AIOHTTPTransport(url=POKEAPI_GRAPHQL_URL, headers=headers, ssl=True)
     client = Client(transport=transport, fetch_schema_from_transport=True)
-    print("Cliente GraphQL inicializado com sucesso.")
+    print("INFO: Cliente GraphQL inicializado com sucesso.")
 except Exception as gql_setup_error:
     print(f"CRITICAL: Falha ao configurar cliente GraphQL: {gql_setup_error}")
     client = None
@@ -55,17 +52,17 @@ except Exception as gql_setup_error:
 # --- Funções de Banco de Dados ---
 
 def get_db_connection():
-    """Retorna uma conexão com o banco de dados."""
+    """Retorna uma conexão com o banco de dados com autocommit."""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
-        conn.autocommit = True # Simplifica transações para operações simples
+        conn.autocommit = True # Habilita autocommit
         return conn
     except psycopg2.OperationalError as e:
         print(f"DB_ERROR: Falha na conexão: {e}")
         raise
 
 def init_db():
-    """Cria as tabelas necessárias ('pokemon', 'user_dex_cache') se não existirem."""
+    """Cria as tabelas necessárias se não existirem."""
     print("DB_INIT: Verificando/Criando tabelas...")
     commands = [
         '''
@@ -115,28 +112,47 @@ def fetch_pokemon_details(pokemon_id: int):
             row = cursor.fetchone()
 
             if row:
-                # Cache hit! Forçar parse de JSON pois psycopg2 parece estar retornando string.
-                stats_str = row[2]
-                types_str = row[4]
+                # Cache hit! Verifica o tipo e processa stats/types
+                stats_val = row[2] # Valor da coluna 'stats' (pode ser str, dict ou None)
+                types_val = row[4] # Valor da coluna 'types' (pode ser str, list ou None)
+                stats_data = {}    # Valor padrão
+                types_data = []    # Valor padrão
+
                 try:
-                    stats_data = json.loads(stats_str) if stats_str else {}
-                    types_data = json.loads(types_str) if types_str else []
+                    # Processa Stats: Se for string, faz parse. Se for dict, usa direto.
+                    if isinstance(stats_val, str):
+                        stats_data = json.loads(stats_val) if stats_val else {}
+                    elif isinstance(stats_val, dict):
+                        stats_data = stats_val
+                    else: # Trata None ou outros tipos inesperados
+                        stats_data = {}
+
+                    # Processa Types: Se for string, faz parse. Se for list, usa direto.
+                    if isinstance(types_val, str):
+                        types_data = json.loads(types_val) if types_val else []
+                    elif isinstance(types_val, list):
+                        types_data = types_val
+                    else: # Trata None ou outros tipos inesperados
+                        types_data = []
+
                 except json.JSONDecodeError as e:
-                    print(f"JSON_ERROR (Cache Hit ID {pokemon_id}): Falha ao decodificar dados do DB. Forçando busca na API.")
-                    print(f"--> Erro: {e}. Dados: stats='{stats_str}', types='{types_str}'")
+                    print(f"JSON_ERROR (Cache Hit ID {pokemon_id}): Falha ao decodificar string do DB! Forçando busca API.")
+                    print(f"--> Erro: {e}. Stats: '{stats_val}', Types: '{types_val}'")
                     row = None # Invalida o cache hit para forçar busca na API
                 except Exception as e_parse:
-                    print(f"PARSE_ERROR (Cache Hit ID {pokemon_id}): Erro inesperado no parse. Forçando busca na API.")
-                    print(f"--> Erro: {e_parse}.")
-                    row = None # Invalida o cache hit
+                     print(f"PARSE_ERROR (Cache Hit ID {pokemon_id}): Erro inesperado no parse. Forçando busca API.")
+                     print(f"--> Erro: {e_parse}.")
+                     row = None # Invalida o cache hit
 
-                if row: # Se o parse deu certo (row não foi invalidado)
-                     return {
+                if row: # Se não deu erro no try/except acima que invalidou 'row'
+                    # Retorna os dados do cache com tipos corretos (dict/list)
+                    return {
                         'id': row[0], 'name': row[1], 'stats': stats_data,
                         'total_base_stats': row[3], 'types': types_data,
                         'image': row[5], 'shiny_image': row[6]
                     }
-                # Se chegou aqui após invalidar 'row', continua para busca na API
+                # Se 'row' foi invalidado, o código continua para a busca na API abaixo...
+            # --- Fim do Bloco Corrigido ---
 
             # 2. Se não achou no DB ou cache hit foi invalidado, busca na API
             print(f"FETCH_API: Buscando ID {pokemon_id} da API...")
@@ -167,7 +183,7 @@ def fetch_pokemon_details(pokemon_id: int):
                 result = client.execute(query, variable_values={"id": pokemon_id})
             except Exception as api_err:
                 print(f"API_ERROR ID {pokemon_id}: {api_err}")
-                return None # Retorna None se API falhar
+                return None
 
             if not result or not result.get("pokemon_v2_pokemon"):
                 print(f"API_WARN ID {pokemon_id}: Nenhum dado retornado.")
@@ -175,11 +191,9 @@ def fetch_pokemon_details(pokemon_id: int):
 
             # Processa dados da API
             data = result["pokemon_v2_pokemon"][0]
-            stats = {s["pokemon_v2_stat"]["name"]: s["base_stat"] for s in data.get("pokemon_v2_pokemonstats", [])} # Python dict
-            types = [t["pokemon_v2_type"]["name"] for t in data.get("pokemon_v2_pokemontypes", [])] # Python list
+            stats = {s["pokemon_v2_stat"]["name"]: s["base_stat"] for s in data.get("pokemon_v2_pokemonstats", [])}
+            types = [t["pokemon_v2_type"]["name"] for t in data.get("pokemon_v2_pokemontypes", [])]
             total_base_stats = sum(stats.values())
-
-            # Processamento de sprites
             sprites_data = data.get("pokemon_v2_pokemonsprites", [])
             sprites = {}
             if sprites_data:
@@ -187,16 +201,15 @@ def fetch_pokemon_details(pokemon_id: int):
                 try:
                     if isinstance(sprite_json_or_dict, str): sprites = json.loads(sprite_json_or_dict)
                     elif isinstance(sprite_json_or_dict, dict): sprites = sprite_json_or_dict
-                except json.JSONDecodeError: pass # Ignora erros de decodificação de sprite
-
+                except json.JSONDecodeError: pass
             image = sprites.get("front_default")
             shiny_image = sprites.get("front_shiny")
 
             # 3. Insere os dados buscados da API no cache 'pokemon'
-            stats_json = json.dumps(stats) # Converte para JSON SÓ para inserir
-            types_json = json.dumps(types) # Converte para JSON SÓ para inserir
+            stats_json = json.dumps(stats)
+            types_json = json.dumps(types)
             try:
-                # Usa o mesmo cursor da conexão principal
+                # Reutiliza o cursor da conexão existente
                 cursor.execute(
                     'INSERT INTO pokemon (id, name, stats, total_base_stats, types, image, shiny_image) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING',
                     (data['id'], data['name'], stats_json, total_base_stats, types_json, image, shiny_image)
@@ -204,24 +217,23 @@ def fetch_pokemon_details(pokemon_id: int):
                 print(f"DB_INSERT: Detalhes do ID {pokemon_id} salvos no cache 'pokemon'.")
             except psycopg2.Error as insert_err:
                  print(f"DB_ERROR (Insert ID {pokemon_id}): {insert_err}")
-                 # Continua mesmo se falhar em salvar no cache
 
             # 4. Retorna os dados processados da API (OBJETOS PYTHON)
             return {
-                'id': data['id'], 'name': data['name'], 'stats': stats, # Retorna dict
-                'total_base_stats': total_base_stats, 'types': types, # Retorna list
+                'id': data['id'], 'name': data['name'], 'stats': stats,
+                'total_base_stats': total_base_stats, 'types': types,
                 'image': image, 'shiny_image': shiny_image
             }
     except psycopg2.Error as db_err:
         print(f"DB_ERROR (Fetch ID {pokemon_id}): {db_err}")
-        return None # Retorna None em caso de erro geral de DB
+        return None
     except Exception as e:
         print(f"UNEXPECTED_ERROR (Fetch ID {pokemon_id}): {e}")
-        traceback.print_exc() # Loga o traceback para erros inesperados
+        traceback.print_exc()
         return None
     finally:
         if conn:
-            conn.close() # Garante que a conexão seja fechada
+            conn.close()
 
 # --- Funções para Cache da Lista de Usuário ---
 
@@ -236,8 +248,8 @@ def get_cached_dex(canal: str, usuario: str):
             cursor.execute(sql, (canal, usuario))
             row = cursor.fetchone()
             if row:
-                cached_list, last_updated_ts = row[0], row[1]
-                if cached_list is None or last_updated_ts is None:
+                cached_list_val, last_updated_ts = row[0], row[1]
+                if cached_list_val is None or last_updated_ts is None:
                      print(f"CACHE_LIST: Dados inválidos (null) para {canal}/{usuario}.")
                      return None
                 now_utc = datetime.datetime.now(timezone.utc)
@@ -245,15 +257,19 @@ def get_cached_dex(canal: str, usuario: str):
                 print(f"CACHE_LIST: Encontrado. Idade: {cache_age}. TTL: {USER_DEX_CACHE_TTL_SECONDS}s")
                 if cache_age.total_seconds() <= USER_DEX_CACHE_TTL_SECONDS:
                     print(f"CACHE_LIST: HIT válido para {canal}/{usuario}.")
-                    # Assume que psycopg2 decodificou JSONB para lista
-                    # Se ainda vier string, precisaria de json.loads aqui também
-                    if isinstance(cached_list, str): # Checagem extra de segurança
+                    # Verifica e faz parse se necessário (segurança extra)
+                    if isinstance(cached_list_val, str):
                         print("CACHE_LIST_WARN: Dado veio como string, tentando parse...")
                         try:
-                            cached_list = json.loads(cached_list)
+                            cached_list = json.loads(cached_list_val)
                         except json.JSONDecodeError:
                             print("CACHE_LIST_ERROR: Falha ao decodificar lista do cache.")
-                            return None # Retorna None se o parse falhar
+                            return None
+                    elif isinstance(cached_list_val, list):
+                         cached_list = cached_list_val
+                    else:
+                         print(f"CACHE_LIST_ERROR: Tipo inesperado para lista ({type(cached_list_val)}).")
+                         return None
                     return cached_list
                 else:
                     print(f"CACHE_LIST: Expirado para {canal}/{usuario}.")
@@ -284,7 +300,7 @@ def update_cached_dex(canal: str, usuario: str, pokemon_list: list):
     now_utc = datetime.datetime.now(timezone.utc)
     conn = None
     try:
-        pokemon_list_json = json.dumps(pokemon_list) # Converte lista para string JSON
+        pokemon_list_json = json.dumps(pokemon_list)
         conn = get_db_connection()
         with conn.cursor() as cursor:
             cursor.execute(sql, (canal, usuario, pokemon_list_json, now_utc))
@@ -383,14 +399,27 @@ def get_pokemons():
             shiny_status = item['shiny']
             details = fetch_pokemon_details(pokemon_id_int)
             if details:
+                # Garantir que stats e types são dict/list antes de adicionar
+                final_stats = details.get('stats', {})
+                final_types = details.get('types', [])
+                if not isinstance(final_stats, dict):
+                    print(f"API_WARN: stats para ID {details.get('id')} não é dict: {type(final_stats)}. Usando {{}}.")
+                    final_stats = {}
+                if not isinstance(final_types, list):
+                    print(f"API_WARN: types para ID {details.get('id')} não é list: {type(final_types)}. Usando [].")
+                    final_types = []
+
                 pokemons_result.append({
-                    'id': details['id'], 'name': details['name'], 'shiny': shiny_status,
-                    'stats': details['stats'], 'total_base_stats': details['total_base_stats'],
-                    'types': details['types'],
-                    'image': details['shiny_image'] if shiny_status else details['image']
+                    'id': details.get('id'),
+                    'name': details.get('name'),
+                    'shiny': shiny_status,
+                    'stats': final_stats,
+                    'total_base_stats': details.get('total_base_stats'),
+                    'types': final_types,
+                    'image': details.get('shiny_image') if shiny_status else details.get('image')
                 })
-            # else: # Opcional: Logar aqui também se detalhes não foram encontrados
-            #    print(f"API_WARN: Detalhes não encontrados para ID {pokemon_id_int} durante montagem final.")
+            # else: # Detalhes não encontrados já é logado em fetch_pokemon_details
+            #    print(f"API_WARN: Detalhes não encontrados para ID {pokemon_id_int}.")
         except (ValueError, KeyError, TypeError) as e:
              print(f"API_ERROR: Erro processando item '{item}' da lista final: {e}")
 
@@ -408,9 +437,8 @@ if __name__ == '__main__':
 
     port = int(os.environ.get('PORT', 5000))
     host = os.environ.get('HOST', '0.0.0.0')
-    # Controla o modo debug pela variável de ambiente (padrão: False)
     debug_mode = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
 
     print(f"==> Iniciando Flask app em http://{host}:{port} (Debug: {debug_mode}) <==")
-    # Desativa o reloader no modo debug para dev local, não afeta produção
+    # use_reloader=False evita init_db duplo em debug local
     app.run(debug=debug_mode, host=host, port=port, use_reloader=False)
