@@ -113,32 +113,21 @@ def fetch_pokemon_details(pokemon_id: int):
 
                 if row:
                     # Cache hit! Processa dados do DB
-                    # psycopg2 já decodifica JSONB para dict/list
                     stats_data = row[2] if row[2] is not None else {}
                     types_data = row[4] if row[4] is not None else []
-                    # --- INÍCIO DA CORREÇÃO NO CACHE HIT ---
+
+                    # --- PRINT DE DEBUG ADICIONADO ---
+                    print(f"DEBUG Cache Hit ID {pokemon_id} - Tipo stats_data: {type(stats_data)}, Tipo types_data: {type(types_data)}")
+                    # --- FIM PRINT DE DEBUG ---
+
                     return {
-                        'id': row[0],
-                        'name': row[1],
-                        'stats': stats_data,         # <-- CORRIGIDO: Retorna o dict/list diretamente
-                        'total_base_stats': row[3],
-                        'types': types_data,         # <-- CORRIGIDO: Retorna o dict/list diretamente
-                        'image': row[5],
-                        'shiny_image': row[6]
+                        'id': row[0], 'name': row[1], 'stats': stats_data,
+                        'total_base_stats': row[3], 'types': types_data,
+                        'image': row[5], 'shiny_image': row[6]
                     }
-                    # --- FIM DA CORREÇÃO NO CACHE HIT ---
 
                 # 2. Se não achou no DB, busca na API
-                query = gql('''
-                    query GetPokemonDetails($id: Int!) {
-                        pokemon_v2_pokemon(where: {id: {_eq: $id}}) {
-                            id name
-                            pokemon_v2_pokemonstats { base_stat pokemon_v2_stat { name } }
-                            pokemon_v2_pokemontypes { pokemon_v2_type { name } }
-                            pokemon_v2_pokemonsprites { sprites }
-                        }
-                    }
-                ''')
+                query = gql(''' ... ''') # Query omitida para brevidade, use a sua completa
                 try:
                     result = client.execute(query, variable_values={"id": pokemon_id})
                 except Exception as api_err:
@@ -150,10 +139,11 @@ def fetch_pokemon_details(pokemon_id: int):
                     return None
 
                 data = result["pokemon_v2_pokemon"][0]
-                stats = {s["pokemon_v2_stat"]["name"]: s["base_stat"] for s in data.get("pokemon_v2_pokemonstats", [])}
+                stats = {s["pokemon_v2_stat"]["name"]: s["base_stat"] for s in data.get("pokemon_v2_pokemonstats", [])} # Python dict
                 total_base_stats = sum(stats.values())
-                types = [t["pokemon_v2_type"]["name"] for t in data.get("pokemon_v2_pokemontypes", [])]
+                types = [t["pokemon_v2_type"]["name"] for t in data.get("pokemon_v2_pokemontypes", [])] # Python list
 
+                # ... (processamento de sprites omitido para brevidade) ...
                 sprites_data = data.get("pokemon_v2_pokemonsprites", [])
                 sprites = {}
                 if sprites_data:
@@ -162,13 +152,13 @@ def fetch_pokemon_details(pokemon_id: int):
                         if isinstance(sprite_json_or_dict, str): sprites = json.loads(sprite_json_or_dict)
                         elif isinstance(sprite_json_or_dict, dict): sprites = sprite_json_or_dict
                     except json.JSONDecodeError: pass
-
                 image = sprites.get("front_default")
                 shiny_image = sprites.get("front_shiny")
 
+
                 # 3. Insere os dados buscados da API no cache 'pokemon'
-                stats_json = json.dumps(stats) # Converte para JSON SÓ para inserir
-                types_json = json.dumps(types) # Converte para JSON SÓ para inserir
+                stats_json = json.dumps(stats)
+                types_json = json.dumps(types)
                 try:
                     cursor.execute('''
                         INSERT INTO pokemon (id, name, stats, total_base_stats, types, image, shiny_image)
@@ -178,11 +168,14 @@ def fetch_pokemon_details(pokemon_id: int):
                 except psycopg2.Error as insert_err:
                      print(f"DB_ERROR: Falha ao inserir detalhes do ID {pokemon_id} no cache 'pokemon': {insert_err}")
 
+                # --- PRINT DE DEBUG ADICIONADO ---
+                print(f"DEBUG Cache Miss ID {pokemon_id} - Tipo stats: {type(stats)}, Tipo types: {type(types)}")
+                # --- FIM PRINT DE DEBUG ---
+
                 # 4. Retorna os dados processados da API (OBJETOS PYTHON)
-                # (Esta parte já estava correta no código que você enviou antes)
                 return {
-                    'id': data['id'], 'name': data['name'], 'stats': stats, # Retorna dict
-                    'total_base_stats': total_base_stats, 'types': types, # Retorna list
+                    'id': data['id'], 'name': data['name'], 'stats': stats,
+                    'total_base_stats': total_base_stats, 'types': types,
                     'image': image, 'shiny_image': shiny_image
                 }
     except psycopg2.Error as db_err:
@@ -195,6 +188,7 @@ def fetch_pokemon_details(pokemon_id: int):
         return None
 
 # --- Funções para Cache da Lista de Usuário ---
+# (get_cached_dex, update_cached_dex, scrape_grynsoft_dex permanecem iguais à versão anterior)
 
 def get_cached_dex(canal: str, usuario: str):
     """Tenta buscar a lista de Pokémon do cache 'user_dex_cache'."""
@@ -258,8 +252,6 @@ def update_cached_dex(canal: str, usuario: str, pokemon_list: list):
     except Exception as e:
         print(f"UNEXPECTED_ERROR ao atualizar user_dex_cache para {canal}/{usuario}: {e}")
         traceback.print_exc()
-
-# --- Função de Scraping (Só raspa a lista) ---
 
 def scrape_grynsoft_dex(canal: str, usuario: str):
     """APENAS faz o scraping do Grynsoft e retorna a lista bruta [{'id':str, 'shiny':bool}]."""
@@ -351,15 +343,23 @@ def get_pokemons():
             if details:
                 pokemons_result.append({
                     'id': details['id'], 'name': details['name'],
-                    'shiny': shiny_status, 'stats': details['stats'], # details['stats'] já é dict
+                    'shiny': shiny_status, 'stats': details['stats'],
                     'total_base_stats': details['total_base_stats'],
-                    'types': details['types'], # details['types'] já é list
+                    'types': details['types'],
                     'image': details['shiny_image'] if shiny_status else details['image']
                 })
             else:
                 print(f"API_WARN: Detalhes não encontrados para ID {pokemon_id_int} (listado para {canal}/{usuario}). Pulando.")
         except (ValueError, KeyError, TypeError) as e:
              print(f"API_ERROR: Erro ao processar item '{item}' da lista: {e}")
+
+    # --- PRINT DE DEBUG ADICIONADO ---
+    if pokemons_result: # Log apenas se a lista não estiver vazia
+         print(f"DEBUG Antes do jsonify - Exemplo de item: {pokemons_result[0]}") # Loga o primeiro item inteiro
+         print(f"DEBUG Antes do jsonify - Tipo stats[0]: {type(pokemons_result[0].get('stats'))}, Tipo types[0]: {type(pokemons_result[0].get('types'))}")
+    else:
+         print("DEBUG Antes do jsonify - pokemons_result está vazio.")
+    # --- FIM PRINT DE DEBUG ---
 
     # --- Resposta Final ---
     print(f"API_RESP: Retornando {len(pokemons_result)} Pokémon com detalhes para {canal}/{usuario}.")
