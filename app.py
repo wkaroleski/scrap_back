@@ -10,399 +10,277 @@ from datetime import timezone
 import traceback
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import requests
-from bs4 import BeautifulSoup
-import psycopg2
-import json
-from gql import gql, Client
-from gql.transport.aiohttp import AIOHTTPTransport
+import json # Necessário para queries JSONB e jsonify
+import psycopg2 # Necessário para interagir com DB diretamente na rota
 
+# --- Importações dos Módulos Refatorados ---
+from database import init_db, get_cached_dex, update_cached_dex, get_db_connection
+from scraping import scrape_grynsoft_dex
+from pokeapi import fetch_pokemon_details
+
+# --- Inicialização do Flask App ---
 app = Flask(__name__)
 CORS(app)
 
-# --- Configurações ---
-USER_DEX_CACHE_TTL_SECONDS = 24 * 60 * 60 # 24 horas
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME")
+# --- Constantes e Configurações ---
+ALLOWED_SORT_COLUMNS = {
+    "id": "id",
+    "name": "name",
+    "total_base_stats": "total_base_stats",
+    "hp": "(stats->>'hp')::int",
+    "attack": "(stats->>'attack')::int",
+    "defense": "(stats->>'defense')::int",
+    "special-attack": "(stats->>'special-attack')::int",
+    "special-defense": "(stats->>'special-defense')::int",
+    "speed": "(stats->>'speed')::int",
 }
+DEFAULT_SORT_COLUMN = "id"
+DEFAULT_SORT_ORDER = "ASC"
 
-# Validação das Variáveis de Ambiente
-for key, value in DB_CONFIG.items():
-    if value is None:
-        raise ValueError(f"Variável de ambiente {key} não configurada.")
+# --- Função Reutilizável para Obter Lista (Cache > Scrape) ---
+def get_or_scrape_user_dex_list(canal_lower: str, usuario_lower: str, canal_original: str, usuario_original: str, refresh: bool = False):
+    # (Código desta função mantido como antes)
+    cached_list = None
+    if not refresh:
+        cached_list = get_cached_dex(canal_lower, usuario_lower)
+    if cached_list is not None:
+        return cached_list
+    else:
+        print(f"HELPER_LIST: {'Refresh solicitado' if refresh else 'Cache miss/expirado'} para {canal_lower}/{usuario_lower}. Iniciando scraping...")
+        scrape_result = scrape_grynsoft_dex(canal_original, usuario_original)
+        if isinstance(scrape_result, dict) and 'error' in scrape_result:
+            print(f"HELPER_LIST: Erro no scraping para {canal_lower}/{usuario_lower}: {scrape_result['error']}")
+            return scrape_result
+        scraped_list = scrape_result
+        if scraped_list is not None:
+             print(f"HELPER_LIST: Scraping para {canal_lower}/{usuario_lower} retornou {len(scraped_list)} itens. Atualizando cache...")
+             update_cached_dex(canal_lower, usuario_lower, scraped_list)
+             return scraped_list
+        else:
+             print(f"HELPER_LIST_WARN: Scraping para {canal_lower}/{usuario_lower} retornou None sem erro explícito.")
+             update_cached_dex(canal_lower, usuario_lower, [])
+             return []
 
-# Configuração PokéAPI GraphQL
-POKEAPI_GRAPHQL_URL = "https://beta.pokeapi.co/graphql/v1beta"
-headers = {
-    "User-Agent": "Mozilla/5.0",
-    "Content-Type": "application/json",
-}
-try:
-    transport = AIOHTTPTransport(url=POKEAPI_GRAPHQL_URL, headers=headers, ssl=True)
-    client = Client(transport=transport, fetch_schema_from_transport=True)
-    print("INFO: Cliente GraphQL inicializado com sucesso.")
-except Exception as gql_setup_error:
-    print(f"CRITICAL: Falha ao configurar cliente GraphQL: {gql_setup_error}")
-    client = None
+# --- Rotas da API ---
 
-# --- Funções de Banco de Dados ---
+@app.route('/api/pokemons', methods=['GET'])
+def get_pokemons():
+    """
+    Endpoint principal. Retorna lista PAGINADA de Pokémon com detalhes,
+    com suporte a FILTRAGEM por tipo e ORDENAÇÃO por stats/id/nome no backend.
+    """
+    # --- Obtenção e Validação de Parâmetros ---
+    canal_original = request.args.get('canal')
+    usuario_original = request.args.get('usuario')
+    refresh_flag = request.args.get('refresh', 'false').lower() == 'true'
 
-def get_db_connection():
-    """Retorna uma conexão com o banco de dados com autocommit."""
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        conn.autocommit = True
-        return conn
-    except psycopg2.OperationalError as e:
-        print(f"DB_ERROR: Falha na conexão: {e}")
-        raise
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        if page < 1: page = 1
+        if per_page < 1: per_page = 20
+    except ValueError:
+        return jsonify({"error": "Parâmetros 'page' e 'per_page' devem ser números inteiros."}), 400
 
-def init_db():
-    """Cria as tabelas necessárias se não existirem."""
-    print("DB_INIT: Verificando/Criando tabelas...")
-    commands = [
-        '''
-        CREATE TABLE IF NOT EXISTS pokemon (
-            id INTEGER PRIMARY KEY, name TEXT, stats JSONB,
-            total_base_stats INTEGER, types JSONB, image TEXT, shiny_image TEXT
-        )
-        ''',
-        '''
-        CREATE TABLE IF NOT EXISTS user_dex_cache (
-            canal TEXT NOT NULL, usuario TEXT NOT NULL, pokemon_list JSONB,
-            last_updated TIMESTAMPTZ NOT NULL, PRIMARY KEY (canal, usuario)
-        )
-        '''
-    ]
+    filter_type = request.args.get('type')
+    sort_by_param = request.args.get('sort_by')
+    order_param = request.args.get('order', DEFAULT_SORT_ORDER).upper()
+
+    canal_lower = canal_original.lower() if canal_original else None
+    usuario_lower = usuario_original.lower() if usuario_original else None
+    if not canal_lower or not usuario_lower:
+        return jsonify({"error": "Forneça 'canal' e 'usuario'."}), 400
+
+    print(f"API_REQ /pokemons: Canal={canal_lower}, Usuario={usuario_lower}, Refresh={refresh_flag}, "
+          f"Page={page}, PerPage={per_page}, Type={filter_type}, SortBy={sort_by_param}, Order={order_param}")
+
+    # --- Obter a Lista Bruta Base (IDs/Shiny) ---
+    list_result = get_or_scrape_user_dex_list(canal_lower, usuario_lower, canal_original, usuario_original, refresh=refresh_flag)
+    if isinstance(list_result, dict) and 'error' in list_result:
+        return jsonify(list_result), 500
+    if list_result is None:
+         return jsonify({"error": "Erro interno ao obter a lista de Pokémon base."}), 500
+    if not list_result:
+         print(f"API_LOGIC /pokemons: Usuário {canal_lower}/{usuario_lower} não possui Pokémon.")
+         return jsonify({"items": [], "metadata": {"page": 1, "per_page": per_page, "total_items": 0, "total_pages": 0}})
+
+    # Extrair IDs e criar mapa de shiny_status
+    user_pokemon_ids_str = set()
+    shiny_map = {}
+    for item in list_result:
+         if isinstance(item, dict) and 'id' in item and item['id'].isdigit():
+              id_str = item['id']
+              user_pokemon_ids_str.add(id_str)
+              shiny_map[id_str] = item.get('shiny', False) == True
+         else:
+              print(f"API_WARN /pokemons: Item inválido na lista base para {canal_lower}/{usuario_lower}: {item}")
+
+    if not user_pokemon_ids_str:
+        print(f"API_LOGIC /pokemons: Nenhum ID válido encontrado para {canal_lower}/{usuario_lower}.")
+        return jsonify({"items": [], "metadata": {"page": 1, "per_page": per_page, "total_items": 0, "total_pages": 0}})
+
+    user_pokemon_ids_int = [int(id_str) for id_str in user_pokemon_ids_str]
+
+    # --- Filtragem e Ordenação no Banco de Dados ---
+    filtered_sorted_ids = []
+    total_items_after_filter = 0
     conn = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            raise Exception("Falha ao conectar ao banco de dados para filtrar/ordenar.")
+
         with conn.cursor() as cursor:
-            for i, command in enumerate(commands):
-                table_name = 'pokemon' if i == 0 else 'user_dex_cache'
-                print(f"DB_INIT: Verificando/Criando tabela '{table_name}'...")
-                cursor.execute(command)
-                print(f"DB_INIT: Tabela '{table_name}' OK.")
-        print("DB_INIT: Inicialização do DB concluída.")
-    except Exception as e:
-        print(f"DB_INIT_ERROR: {e}")
-        raise
-    finally:
-         if conn:
-            conn.close()
+            # --- Construção da Query SQL ---
+            # CORREÇÃO: Inicializa lista de parâmetros
+            params_list = []
+            sql_select = "SELECT id"
+            sql_from_table = "pokemon"
 
-# --- Funções de Lógica de Pokémon ---
+            # CORREÇÃO: Monta WHERE e adiciona parâmetros à lista
+            sql_where = "WHERE id = ANY(%s)"
+            params_list.append(user_pokemon_ids_int) # Adiciona a lista de IDs diretamente
 
-def fetch_pokemon_details(pokemon_id: int):
-    """Busca detalhes do Pokémon, DB > API. Retorna dict ou None."""
-    if client is None:
-        print(f"FETCH_ERROR ID {pokemon_id}: Cliente GraphQL não disponível.")
-        return None
+            if filter_type:
+                sql_where += " AND types @> %s::jsonb"
+                params_list.append(json.dumps([filter_type])) # Adiciona o parâmetro de tipo
+                print(f"API_LOGIC /pokemons: Aplicando filtro type='{filter_type}'")
 
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            # 1. Tenta buscar no banco de dados (cache 'pokemon')
-            cursor.execute('SELECT id, name, stats, total_base_stats, types, image, shiny_image FROM pokemon WHERE id = %s', (pokemon_id,))
-            row = cursor.fetchone()
+            # Monta ORDER BY (sem mudanças aqui)
+            sql_order_by = ""
+            sort_column_sql = ALLOWED_SORT_COLUMNS.get(sort_by_param, ALLOWED_SORT_COLUMNS[DEFAULT_SORT_COLUMN])
+            sort_order_sql = "DESC" if order_param == "DESC" else "ASC"
+            sql_order_by = f"ORDER BY {sort_column_sql} {sort_order_sql}, id ASC"
+            print(f"API_LOGIC /pokemons: Aplicando ordenação por {sort_column_sql} {sort_order_sql}")
 
-            if row:
-                # Cache hit! Verifica o tipo e processa stats/types
-                stats_val = row[2]
-                types_val = row[4]
-                stats_data = {}
-                types_data = []
-                try:
-                    if isinstance(stats_val, str): stats_data = json.loads(stats_val) if stats_val else {}
-                    elif isinstance(stats_val, dict): stats_data = stats_val
-                    else: stats_data = {}
-                    if isinstance(types_val, str): types_data = json.loads(types_val) if types_val else []
-                    elif isinstance(types_val, list): types_data = types_val
-                    else: types_data = []
-                except json.JSONDecodeError as e:
-                    print(f"JSON_ERROR (Cache Hit ID {pokemon_id}): Falha DB string parse. Forcing API fetch.")
-                    print(f"--> Erro: {e}. Stats: '{stats_val}', Types: '{types_val}'")
-                    row = None # Invalida cache hit
-                except Exception as e_parse:
-                     print(f"PARSE_ERROR (Cache Hit ID {pokemon_id}): Unexpected parse error. Forcing API fetch.")
-                     print(f"--> Erro: {e_parse}.")
-                     row = None # Invalida cache hit
+            # --- Query para Contagem Total (Após Filtros) ---
+            sql_count = f"SELECT COUNT(*) FROM {sql_from_table} {sql_where}"
+            print(f"DEBUG /pokemons: Executando COUNT query: {cursor.mogrify(sql_count, params_list).decode('utf-8')}")
+            # CORREÇÃO: Passa a lista de parâmetros diretamente
+            cursor.execute(sql_count, params_list)
+            total_items_after_filter = cursor.fetchone()[0]
+            print(f"API_LOGIC /pokemons: Total de itens após filtro: {total_items_after_filter}")
 
-                if row: # Se parse deu certo
-                    return {
-                        'id': row[0], 'name': row[1], 'stats': stats_data,
-                        'total_base_stats': row[3], 'types': types_data,
-                        'image': row[5], 'shiny_image': row[6]
-                    }
-                # Se row foi invalidado, continua para API...
+            # --- Query para Obter IDs da Página ---
+            total_pages = 0 # Inicializa total_pages
+            if total_items_after_filter > 0:
+                 total_pages = (total_items_after_filter + per_page - 1) // per_page
+                 if page > total_pages:
+                      print(f"API_WARN /pokemons: Página {page} solicitada excede o total de {total_pages} páginas após filtro.")
+                 else:
+                    offset = (page - 1) * per_page
+                    sql_fetch_ids = f"{sql_select} FROM {sql_from_table} {sql_where} {sql_order_by} LIMIT %s OFFSET %s"
+                    # CORREÇÃO: Cria lista final de parâmetros para esta query
+                    fetch_params_list = params_list + [per_page, offset]
+                    print(f"DEBUG /pokemons: Executando FETCH IDs query: {cursor.mogrify(sql_fetch_ids, fetch_params_list).decode('utf-8')}")
+                    # CORREÇÃO: Passa a lista de parâmetros correta
+                    cursor.execute(sql_fetch_ids, fetch_params_list)
+                    filtered_sorted_ids = [row[0] for row in cursor.fetchall()]
+                    print(f"API_LOGIC /pokemons: IDs para a página {page} (após filtro/sort): {filtered_sorted_ids}")
+            # else: # Não precisa do else, total_pages já é 0
 
-            # 2. Cache miss ou cache hit invalidado -> Busca na API
-            print(f"FETCH_API: Buscando ID {pokemon_id} da API...")
-            query = gql('''
-                query GetPokemonDetails($id: Int!) {
-                    pokemon_v2_pokemon(where: {id: {_eq: $id}}) {
-                        id name
-                        pokemon_v2_pokemonstats { base_stat pokemon_v2_stat { name } }
-                        pokemon_v2_pokemontypes { pokemon_v2_type { name } }
-                        pokemon_v2_pokemonsprites { sprites }
-                    }
-                }
-            ''')
-            try:
-                result = client.execute(query, variable_values={"id": pokemon_id})
-            except Exception as api_err:
-                print(f"API_ERROR ID {pokemon_id}: {api_err}")
-                return None
-            if not result or not result.get("pokemon_v2_pokemon"):
-                print(f"API_WARN ID {pokemon_id}: Nenhum dado retornado.")
-                return None
-
-            data = result["pokemon_v2_pokemon"][0]
-            stats = {s["pokemon_v2_stat"]["name"]: s["base_stat"] for s in data.get("pokemon_v2_pokemonstats", [])}
-            types = [t["pokemon_v2_type"]["name"] for t in data.get("pokemon_v2_pokemontypes", [])]
-            total_base_stats = sum(stats.values())
-            sprites_data = data.get("pokemon_v2_pokemonsprites", [])
-            sprites = {}
-            if sprites_data:
-                sprite_json_or_dict = sprites_data[0].get("sprites", "{}")
-                try:
-                    if isinstance(sprite_json_or_dict, str): sprites = json.loads(sprite_json_or_dict)
-                    elif isinstance(sprite_json_or_dict, dict): sprites = sprite_json_or_dict
-                except json.JSONDecodeError: pass
-            image = sprites.get("front_default")
-            shiny_image = sprites.get("front_shiny")
-
-            stats_json = json.dumps(stats)
-            types_json = json.dumps(types)
-            try:
-                cursor.execute(
-                    'INSERT INTO pokemon (id, name, stats, total_base_stats, types, image, shiny_image) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING',
-                    (data['id'], data['name'], stats_json, total_base_stats, types_json, image, shiny_image)
-                )
-                print(f"DB_INSERT: Detalhes do ID {pokemon_id} salvos no cache 'pokemon'.")
-            except psycopg2.Error as insert_err:
-                 print(f"DB_ERROR (Insert ID {pokemon_id}): {insert_err}")
-
-            return { # Retorna objetos Python
-                'id': data['id'], 'name': data['name'], 'stats': stats,
-                'total_base_stats': total_base_stats, 'types': types,
-                'image': image, 'shiny_image': shiny_image
-            }
     except psycopg2.Error as db_err:
-        print(f"DB_ERROR (Fetch ID {pokemon_id}): {db_err}")
-        return None
-    except Exception as e:
-        print(f"UNEXPECTED_ERROR (Fetch ID {pokemon_id}): {e}")
+        print(f"DB_ERROR /pokemons: Erro ao filtrar/ordenar IDs: {db_err}")
         traceback.print_exc()
-        return None
+        return jsonify({"error": "Erro no banco de dados ao processar filtros/ordenação."}), 500
+    except Exception as e:
+        print(f"APP_ERROR /pokemons: Erro inesperado ao filtrar/ordenar: {e}")
+        traceback.print_exc()
+        return jsonify({"error": "Erro interno inesperado ao processar filtros/ordenação."}), 500
     finally:
         if conn:
             conn.close()
 
-# --- Funções para Cache da Lista de Usuário ---
+    # --- Paginação (Cálculo final dos metadados) ---
+    # A variável total_pages já foi calculada dentro do bloco try
+    if 'total_pages' not in locals(): total_pages = 0 # Garante que total_pages exista
+    metadata = {"page": page, "per_page": per_page, "total_items": total_items_after_filter, "total_pages": total_pages}
 
-def get_cached_dex(canal_lower: str, usuario_lower: str):
-    """Tenta buscar a lista de Pokémon do cache 'user_dex_cache'. Usa chaves MINÚSCULAS."""
-    print(f"CACHE_LIST: Verificando user_dex_cache para {canal_lower}/{usuario_lower}...")
-    sql = "SELECT pokemon_list, last_updated FROM user_dex_cache WHERE canal = %s AND usuario = %s"
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            cursor.execute(sql, (canal_lower, usuario_lower))
-            row = cursor.fetchone()
-            if row:
-                cached_list_val, last_updated_ts = row[0], row[1]
-                if cached_list_val is None or last_updated_ts is None: return None
-                now_utc = datetime.datetime.now(timezone.utc)
-                cache_age = now_utc - last_updated_ts
-                print(f"CACHE_LIST: Encontrado. Idade: {cache_age}. TTL: {USER_DEX_CACHE_TTL_SECONDS}s")
-                if cache_age.total_seconds() <= USER_DEX_CACHE_TTL_SECONDS:
-                    print(f"CACHE_LIST: HIT válido para {canal_lower}/{usuario_lower}.")
-                    # Processa valor lido (pode ser string ou list)
-                    if isinstance(cached_list_val, str):
-                        try: cached_list = json.loads(cached_list_val)
-                        except json.JSONDecodeError: return None
-                    elif isinstance(cached_list_val, list): cached_list = cached_list_val
-                    else: return None
-                    return cached_list
-                else:
-                    print(f"CACHE_LIST: Expirado para {canal_lower}/{usuario_lower}.")
-                    return None
-            else:
-                print(f"CACHE_LIST: MISS para {canal_lower}/{usuario_lower}.")
-                return None
-    except psycopg2.Error as db_err: print(f"DB_ERROR ao buscar user_dex_cache: {db_err}"); return None
-    except Exception as e: print(f"UNEXPECTED_ERROR ao buscar user_dex_cache: {e}"); return None
-    finally:
-        if conn: conn.close()
+    if total_items_after_filter == 0 or not filtered_sorted_ids:
+         print(f"API_LOGIC /pokemons: Nenhum item encontrado para a página {page} após filtros/ordenação.")
+         return jsonify({"items": [], "metadata": metadata}) # Retorna metadados mesmo se vazio
 
-def update_cached_dex(canal_lower: str, usuario_lower: str, pokemon_list: list):
-    """Insere/atualiza lista no cache 'user_dex_cache'. Usa chaves MINÚSCULAS."""
-    print(f"CACHE_LIST: Atualizando user_dex_cache para {canal_lower}/{usuario_lower}...")
-    sql = """
-        INSERT INTO user_dex_cache (canal, usuario, pokemon_list, last_updated)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (canal, usuario) DO UPDATE SET
-            pokemon_list = EXCLUDED.pokemon_list,
-            last_updated = EXCLUDED.last_updated;
-    """
-    now_utc = datetime.datetime.now(timezone.utc)
-    conn = None
-    try:
-        pokemon_list_json = json.dumps(pokemon_list)
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            cursor.execute(sql, (canal_lower, usuario_lower, pokemon_list_json, now_utc))
-        print(f"CACHE_LIST: user_dex_cache atualizado com sucesso.")
-    except TypeError as json_err: print(f"JSON_ERROR ao serializar lista: {json_err}")
-    except psycopg2.Error as db_err: print(f"DB_ERROR ao atualizar user_dex_cache: {db_err}")
-    except Exception as e: print(f"UNEXPECTED_ERROR ao atualizar user_dex_cache: {e}")
-    finally:
-        if conn: conn.close()
+    # --- Buscar Detalhes Apenas para os IDs da Página ---
+    pokemons_data_page = []
+    print(f"API_LOGIC /pokemons: Buscando detalhes para {len(filtered_sorted_ids)} IDs da página {page}...")
+    for pokemon_id_int in filtered_sorted_ids:
+        details = fetch_pokemon_details(pokemon_id_int)
+        id_str = str(pokemon_id_int)
 
-# --- Função de Scraping ---
+        if details:
+            shiny_status = shiny_map.get(id_str, False)
+            final_stats = details.get('stats', {})
+            final_types = details.get('types', [])
+            if not isinstance(final_stats, dict): final_stats = {}
+            if not isinstance(final_types, list): final_types = []
 
-def scrape_grynsoft_dex(canal_original: str, usuario_original: str):
-    """Faz o scraping e retorna a lista bruta [{'id':str, 'shiny':bool}] ou dict de erro."""
-    url = f"https://grynsoft.com/spos-app/?c={canal_original}&u={usuario_original}"
-    print(f"SCRAPING: Iniciando busca da LISTA em: {url}")
-    scraped_list = []
-    seen_ids = set()
-    try:
-        response = requests.get(url, headers=headers, timeout=20)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
-        pokemon_elements = soup.select('.Pokemon:not(#unobtained)')
-        for element in pokemon_elements:
-            index_element = element.select_one('.Index')
-            if not index_element: continue
-            pokemon_id_str = index_element.text.strip().lstrip('#0')
-            if not pokemon_id_str.isdigit(): continue
-            if pokemon_id_str in seen_ids: continue
-            seen_ids.add(pokemon_id_str)
-            shiny = element.get('id') == 'shiny'
-            scraped_list.append({'id': pokemon_id_str, 'shiny': shiny})
-        print(f"SCRAPING: Lista concluída. Encontrados {len(scraped_list)} Pokémon únicos.")
-        return scraped_list
-    except requests.exceptions.Timeout: return {"error": f"Timeout ao raspar {url}"}
-    except requests.exceptions.RequestException as e: return {"error": f"Erro de rede/HTTP ao raspar {url}"}
-    except Exception as e: print(f"SCRAPING_ERROR: {e}"); traceback.print_exc(); return {"error": "Erro inesperado no scraping"}
+            pokemons_data_page.append({
+                'id': details.get('id'), 'name': details.get('name'),
+                'shiny': shiny_status, 'stats': final_stats,
+                'total_base_stats': details.get('total_base_stats'),
+                'types': final_types,
+                'image': details.get('shiny_image') if shiny_status else details.get('image')
+            })
+        else:
+            print(f"API_WARN /pokemons: Falha ao obter detalhes para ID {pokemon_id_int} (pós-filtro/sort) na página {page}.")
 
-# --- Função Reutilizável para Obter Lista (Cache > Scrape) ---
+    # --- Montar a Resposta Final Paginada ---
+    response_data = {
+        "items": pokemons_data_page,
+        "metadata": metadata # Usa os metadados calculados anteriormente
+    }
+    print(f"API_RESP /pokemons: Retornando {len(pokemons_data_page)} Pokémon para a página {page}/{total_pages} (Total filtrado: {total_items_after_filter}).")
+    return jsonify(response_data)
 
-def get_or_scrape_user_dex_list(canal_lower: str, usuario_lower: str, canal_original: str, usuario_original: str, refresh: bool = False):
-    """Busca a lista bruta de Pokémon [{'id':str, 'shiny':bool}] para um usuário."""
-    scraped_list = None
-    if not refresh:
-        scraped_list = get_cached_dex(canal_lower, usuario_lower)
-    if scraped_list is None:
-        print(f"HELPER_LIST: {'Refresh' if refresh else 'Cache miss/expirado'} para {canal_lower}/{usuario_lower}. Scraping...")
-        scrape_result = scrape_grynsoft_dex(canal_original, usuario_original)
-        if isinstance(scrape_result, dict) and 'error' in scrape_result:
-            return scrape_result
-        scraped_list = scrape_result
-        if scraped_list:
-            update_cached_dex(canal_lower, usuario_lower, scraped_list)
-    if scraped_list is None: scraped_list = []
-    return scraped_list
 
-# --- Rota Principal da API (/api/pokemons) ---
-
-@app.route('/api/pokemons', methods=['GET'])
-def get_pokemons():
-    """Endpoint principal. Usa get_or_scrape_user_dex_list e depois busca detalhes."""
-    canal_original = request.args.get('canal')
-    usuario_original = request.args.get('usuario')
-    refresh_flag = request.args.get('refresh', 'false').lower() == 'true'
-    canal_lower = canal_original.lower() if canal_original else None
-    usuario_lower = usuario_original.lower() if usuario_original else None
-    if not canal_lower or not usuario_lower: return jsonify({"error": "Forneça 'canal' e 'usuario'."}), 400
-
-    print(f"API_REQ /pokemons: Canal={canal_lower}, Usuario={usuario_lower}, Refresh={refresh_flag}")
-    list_result = get_or_scrape_user_dex_list(canal_lower, usuario_lower, canal_original, usuario_original, refresh=refresh_flag)
-    if isinstance(list_result, dict) and 'error' in list_result: return jsonify(list_result), 500
-
-    print(f"API_LOGIC /pokemons: Processando {len(list_result)} itens da lista...")
-    pokemons_result = []
-    for item in list_result:
-        try:
-            pokemon_id_int = int(item['id'])
-            shiny_status = item['shiny']
-            details = fetch_pokemon_details(pokemon_id_int)
-            if details:
-                final_stats = details.get('stats', {})
-                final_types = details.get('types', [])
-                if not isinstance(final_stats, dict): final_stats = {}
-                if not isinstance(final_types, list): final_types = []
-                pokemons_result.append({
-                    'id': details.get('id'), 'name': details.get('name'),
-                    'shiny': shiny_status, 'stats': final_stats,
-                    'total_base_stats': details.get('total_base_stats'),
-                    'types': final_types,
-                    'image': details.get('shiny_image') if shiny_status else details.get('image')
-                })
-        except (ValueError, KeyError, TypeError) as e:
-             print(f"API_ERROR /pokemons: Erro processando item '{item}': {e}")
-
-    print(f"API_RESP /pokemons: Retornando {len(pokemons_result)} Pokémon.")
-    return jsonify(pokemons_result)
-
-# --- ROTA DE COMPARAÇÃO DE DEX (/api/compare_dex) --- AJUSTADA ---
-
+# --- Rota de Comparação (Mantida da versão anterior) ---
 @app.route('/api/compare_dex', methods=['GET'])
 def compare_dex():
-    """
-    Compara as listas de Pokémon entre dois usuários no mesmo canal.
-    Retorna os detalhes COMPLETOS dos Pokémon que usuario2 tem e usuario1 NÃO tem.
-    """
+    # (Código desta função mantido exatamente como na versão anterior)
     # 1. Pega e valida parâmetros
     canal_original = request.args.get('canal')
-    usuario1_original = request.args.get('usuario1') # "Eu" (usuário base)
-    usuario2_original = request.args.get('usuario2') # "O outro" (usuário comparado)
+    usuario1_original = request.args.get('usuario1')
+    usuario2_original = request.args.get('usuario2')
 
     if not all([canal_original, usuario1_original, usuario2_original]):
         return jsonify({"error": "Forneça canal, usuario1 (você) e usuario2 (o outro)."}), 400
     if usuario1_original.lower() == usuario2_original.lower():
          return jsonify({"error": "usuario1 e usuario2 não podem ser iguais."}), 400
 
-    # 2. Padroniza para minúsculas para cache
+    # 2. Padroniza
     canal_lower = canal_original.lower()
     usuario1_lower = usuario1_original.lower()
     usuario2_lower = usuario2_original.lower()
-
     print(f"API_REQ /compare_dex: Canal={canal_lower}, Base(User1)={usuario1_lower}, Comparado(User2)={usuario2_lower}")
 
-    # 3. Obtém as listas brutas (contêm 'id' e 'shiny')
+    # 3. Obtém as listas brutas
     list1_result = get_or_scrape_user_dex_list(canal_lower, usuario1_lower, canal_original, usuario1_original, refresh=False)
-    if isinstance(list1_result, dict) and 'error' in list1_result:
-        return jsonify({"error_user1": f"Falha ao obter dados para {usuario1_original}: {list1_result['error']}"}), 500
+    if isinstance(list1_result, dict) and 'error' in list1_result: return jsonify({"error_user1": f"Falha ao obter dados para {usuario1_original}: {list1_result['error']}"}), 500
+    if list1_result is None: return jsonify({"error_user1": f"Erro interno ao obter dados para {usuario1_original}."}), 500
 
     list2_result = get_or_scrape_user_dex_list(canal_lower, usuario2_lower, canal_original, usuario2_original, refresh=False)
-    if isinstance(list2_result, dict) and 'error' in list2_result:
-        return jsonify({"error_user2": f"Falha ao obter dados para {usuario2_original}: {list2_result['error']}"}), 500
+    if isinstance(list2_result, dict) and 'error' in list2_result: return jsonify({"error_user2": f"Falha ao obter dados para {usuario2_original}: {list2_result['error']}"}), 500
+    if list2_result is None: return jsonify({"error_user2": f"Erro interno ao obter dados para {usuario2_original}."}), 500
 
     # 4. Cria lookups e extrai IDs
-    user2_dict = {item['id']: item for item in list2_result}
-    set1_ids = {item['id'] for item in list1_result} # IDs que EU tenho
-    set2_ids = set(user2_dict.keys())                # IDs que o OUTRO tem
+    user2_dict = {item['id']: item for item in list2_result if isinstance(item, dict) and 'id' in item}
+    set1_ids = {item['id'] for item in list1_result if isinstance(item, dict) and 'id' in item}
+    set2_ids = set(user2_dict.keys())
 
-    # 5. Calcula a diferença: IDs que o OUTRO (user2) tem e EU (user1) NÃO tenho
-    usuario2_tem_que_usuario1_nao_tem_ids = sorted(list(set2_ids - set1_ids), key=int)
-
+    # 5. Calcula a diferença
+    try:
+        usuario2_tem_que_usuario1_nao_tem_ids = sorted(list(set2_ids - set1_ids), key=int)
+    except ValueError:
+         print(f"COMPARE_WARN: IDs não numéricos encontrados na diferença: {list(set2_ids - set1_ids)}")
+         usuario2_tem_que_usuario1_nao_tem_ids = sorted(list(set2_ids - set1_ids))
     print(f"API_LOGIC /compare_dex: User2 ({usuario2_lower}) tem {len(usuario2_tem_que_usuario1_nao_tem_ids)} Pokémon exclusivos.")
 
-    # 6. Busca detalhes COMPLETOS para a lista de diferença
+    # 6. Busca detalhes COMPLETOS
     pokemon_faltantes_para_user1 = []
     for id_str in usuario2_tem_que_usuario1_nao_tem_ids:
         try:
             pokemon_id_int = int(id_str)
-            details = fetch_pokemon_details(pokemon_id_int) # Usa cache 'pokemon'
+            details = fetch_pokemon_details(pokemon_id_int)
             if details:
                 original_item = user2_dict.get(id_str)
                 shiny_status = original_item['shiny'] if original_item else False
@@ -410,6 +288,7 @@ def compare_dex():
                 final_types = details.get('types', [])
                 if not isinstance(final_stats, dict): final_stats = {}
                 if not isinstance(final_types, list): final_types = []
+
                 pokemon_faltantes_para_user1.append({
                     'id': details.get('id'), 'name': details.get('name'),
                     'shiny': shiny_status, 'stats': final_stats,
@@ -417,31 +296,34 @@ def compare_dex():
                     'types': final_types,
                     'image': details.get('shiny_image') if shiny_status else details.get('image')
                 })
+            else:
+                 print(f"COMPARE_WARN: Falha ao obter detalhes para ID {id_str} na comparação.")
         except (ValueError, KeyError, TypeError) as e:
              print(f"COMPARE_ERROR: Erro processando ID {id_str} para detalhes completos: {e}")
 
-    # 7. Monta e retorna a resposta final simplificada
+    # 7. Monta e retorna a resposta final
     response_data = {
         "canal": canal_original,
         "usuario_base": usuario1_original,
         "usuario_comparado": usuario2_original,
-        "pokemon_que_faltam": pokemon_faltantes_para_user1 # Lista com detalhes completos
+        "pokemon_que_faltam": pokemon_faltantes_para_user1
     }
-
+    print(f"API_RESP /compare_dex: Retornando {len(pokemon_faltantes_para_user1)} Pokémon faltantes para {usuario1_original}.")
     return jsonify(response_data)
 
-# --- Inicialização do Servidor ---
 
+# --- Inicialização do Servidor ---
 if __name__ == '__main__':
     try:
+        print("APP_INIT: Preparando para chamar init_db()...")
         init_db()
+        print("APP_INIT: Chamada a init_db() concluída.")
     except Exception as e:
-        print(f"CRITICAL_ERROR: Falha inicialização DB: {e}")
-        exit(1)
+        print(f"CRITICAL_ERROR: Falha na chamada de init_db: {e}")
 
     port = int(os.environ.get('PORT', 5000))
     host = os.environ.get('HOST', '0.0.0.0')
-    debug_mode = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
+    debug_mode = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true' or os.environ.get('FLASK_ENV') == 'development'
 
     print(f"==> Iniciando Flask app em http://{host}:{port} (Debug: {debug_mode}) <==")
     app.run(debug=debug_mode, host=host, port=port, use_reloader=False)
